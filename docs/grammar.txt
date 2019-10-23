@@ -1,7 +1,7 @@
 Ergo language's Grammar which written in BNF(Backus-Naur Form).
 
 Number ::= [0-9]+ ;
-Term_Expr ::= Number ;
+Term_Expr ::= Number | '(' Assign_Expr ')' ;
 Addition_Expr ::= Term_Expr (('+' | '-') Term_Expr)* ;
 Multi_Expr ::= Addition_Expr (('*' | '/') Addition_Expr)* ;
 Assign_Expr ::= Multi_Expr ('=' Multi_Expr)* ;
