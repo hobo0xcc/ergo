@@ -10,20 +10,25 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use inkwell::module::Module;
-use inkwell::values::{FloatValue, FunctionValue};
+use inkwell::values::{FloatValue, FunctionValue, PointerValue};
 use std::error::Error;
 use std::fmt;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Number(f64),    // [0-9]+
     Ident(String),  // [a-zA-Z_]+
+    Var,            // 'var'
     LParen,         // ')'
     RParen,         // '('
+    SemiColon,      // ';'
     Plus,           // '+'
     Minus,          // '-'
     AsterRisk,      // '*'
     Slash,          // '/'
+    Assign,         // '='
+    Return,         // 'return'
     ErrorToken(Option<char>),
     EOF,
 }
@@ -48,6 +53,10 @@ impl fmt::Display for Token {
             Token::Slash => "/",
             Token::ErrorToken(_) => "Illegal Token",
             Token::EOF => "EOF",
+            Token::Var => "var",
+            Token::Assign => "=",
+            Token::SemiColon => ";",
+            Token::Return => "return",
         };
         write!(f, "{}", tok_str)
     }
@@ -160,8 +169,10 @@ impl Lexer {
                     .map(|c| *c as char)
                     .collect();
 
-                match &ident {
-                    _ => return Token::Ident(ident)
+                match &ident as &str {
+                    "return" => return Token::Return,
+                    "var" => return Token::Var,
+                    _ => return Token::Ident(ident),
                 }
             }
 
@@ -194,6 +205,8 @@ impl Lexer {
                 Some('-') =>    return Token::Minus,
                 Some('*') =>    return Token::AsterRisk,
                 Some('/') =>    return Token::Slash,
+                Some('=') =>    return Token::Assign,
+                Some(';') =>    return Token::SemiColon,
                 Some(ch)  =>    return Token::ErrorToken(Some(ch)),
                 None      =>    return Token::ErrorToken(None),
             }
@@ -231,6 +244,16 @@ pub enum AST {
         op: Token,
         rhs: Box<AST>,
     },
+    VariableDecl {
+        name: String,
+    },
+    Variable(String),
+    StmtList {
+        list: Vec<AST>
+    },
+    Return {
+        expr: Box<AST>
+    },
     Number(f64),
 }
 
@@ -242,6 +265,22 @@ impl fmt::Display for AST {
             },
             AST::Number(n) => {
                 format!("number({})", n)
+            },
+            AST::VariableDecl { name } => {
+                format!("vardecl({})", name)
+            },
+            AST::Return { expr } => {
+                format!("return({})", *expr)
+            },
+            AST::Variable(name) => {
+                format!("var({})", name)
+            },
+            AST::StmtList { list } => {
+                let mut fmt_list = String::new();
+                for e in list.iter() {
+                    fmt_list += format!("{}\n", e).as_str();
+                }
+                fmt_list
             }
         };
         write!(f, "{}", fmt_str)
@@ -289,6 +328,15 @@ impl Parser {
         }
     }
 
+    pub fn expect(&mut self, tok: Token) -> Token {
+        if self.cur().0 != tok {
+            eprintln!("Error (at line {}): Expected {}, but got {}.", self.cur().1, tok, self.cur().0);
+            process::exit(1);
+        }
+
+        self.eat().0
+    }
+
     pub fn primary_expr(&mut self) -> AST {
         match self.eat() {
             (Token::LParen, _) => {
@@ -301,6 +349,7 @@ impl Parser {
                 expr
             },
             (Token::Number(n), _) => AST::Number(n),
+            (Token::Ident(s), _) => AST::Variable(s),
             (tok, line) => {
                 eprintln!("Error (at line {}): Unexpected Token: {}", line, tok);
                 process::exit(1);
@@ -356,8 +405,98 @@ impl Parser {
         left
     }
 
+    pub fn assign_expr(&mut self) -> AST {
+        let mut left = self.add_expr();
+        loop {
+            let op = self.cur();
+            match op {
+                (Token::Assign, _) => self.p += 1,
+                _ => break,
+            }
+
+            let right = self.add_expr();
+            match op.0 {
+                Token::Assign => {
+                    left =  AST::BinaryExpr {
+                        lhs: Box::new(left),
+                        op: op.0.clone(),
+                        rhs: Box::new(right) }
+                },
+                _ => break,
+            }
+        }
+
+        left
+    }
+
+    pub fn var_stmt(&mut self) -> AST {
+        self.expect(Token::Var);
+        let name = match self.cur() {
+            (Token::Ident(s), _) => s,
+            _ => {
+                eprintln!("Error (at line {}): Unexpected {}.", self.cur().1, self.cur().0);
+                process::exit(1);
+            }
+        };
+        self.eat();
+        let var_decl = AST::VariableDecl {
+            name: name.clone(),
+        };
+        if self.cur().0 == Token::Assign {
+            let mut list: Vec<AST> = Vec::new();
+            let var = AST::Variable(name);
+            let op = self.eat().0;
+            let assign_expr = AST::BinaryExpr {
+                lhs: Box::new(var),
+                op,
+                rhs: Box::new(self.assign_expr()),
+            };
+            list.push(var_decl);
+            list.push(assign_expr);
+            AST::StmtList {
+                list,
+            }
+        } else {
+            var_decl
+        }
+    }
+
+    pub fn return_stmt(&mut self) -> AST {
+        self.expect(Token::Return);
+        let expr = self.assign_expr();
+        AST::Return {
+            expr: Box::new(expr),
+        }
+    }
+
+    pub fn statement(&mut self) -> AST {
+        let stmt: AST;
+        match self.cur() {
+            (Token::Var, _) => {
+                stmt = self.var_stmt();
+                self.expect(Token::SemiColon);
+            },
+            (Token::Return, _) => {
+                stmt = self.return_stmt();
+                self.expect(Token::SemiColon);
+            },
+            _ => {
+                stmt = self.assign_expr();
+                self.expect(Token::SemiColon);
+            },
+        }
+
+        stmt
+    }
+
     pub fn parse(&mut self) -> AST {
-        self.add_expr()
+        let mut ast_list: Vec<AST> = Vec::new();
+        while self.cur().0 != Token::EOF {
+            ast_list.push(self.statement());
+        }
+        AST::StmtList {
+            list: ast_list
+        }
     }
 }
 
@@ -366,6 +505,8 @@ struct Compiler<'a> {
     module: &'a Module,
     builder: &'a Builder,
     execution_engine: &'a ExecutionEngine,
+    variables: HashMap<String, PointerValue>,
+    func: Option<FunctionValue>,
 }
 
 type Sum = unsafe extern "C" fn () -> f64;
@@ -380,9 +521,10 @@ impl<'a> Compiler<'a> {
             module,
             builder,
             execution_engine,
+            variables: HashMap::new(),
+            func: None,
         };
-        compiler.create_func("Sum");
-        compiler.builder.build_alloca(compiler.context.f64_type(), "sumval");
+        compiler.func = Some(compiler.create_func("main"));
         compiler
     }
 
@@ -396,27 +538,83 @@ impl<'a> Compiler<'a> {
         func
     }
 
+    pub fn create_alloca(&mut self, name: String) -> PointerValue {
+        let builder = self.context.create_builder();
+        let entry = self.func.unwrap().get_first_basic_block().unwrap();
+        match entry.get_first_instruction() {
+            Some(inst) => builder.position_before(&inst),
+            None => builder.position_at_end(&entry),
+        }
+
+        builder.build_alloca(self.context.f64_type(), &name)
+    }
+
     pub fn compile_expr(&mut self, expr: AST) -> FloatValue {
         match expr {
             AST::Number(n) => {
                 self.context.f64_type().const_float(n)
             },
             AST::BinaryExpr { lhs, op, rhs } => {
-                let left = self.compile_expr(*lhs);
-                let right = self.compile_expr(*rhs);
-                match op {
-                    Token::Plus => self.builder.build_float_add(left, right, "sumval"),
-                    Token::Minus => self.builder.build_float_sub(left, right, "sumval"),
-                    Token::AsterRisk => self.builder.build_float_mul(left, right, "sumval"),
-                    Token::Slash => self.builder.build_float_div(left, right, "sumval"),
-                    _ => left
+                if op == Token::Assign {
+                    let name = match *lhs {
+                        AST::Variable(name) => name.clone(),
+                        _ => {
+                            eprintln!("Error: Not a variable.");
+                            process::exit(1);
+                        }
+                    };
+                    let right = self.compile_expr(*rhs);
+                    let var = self.variables.get(&name).ok_or("Error: Undefined variable name.").unwrap();
+                    self.builder.build_store(*var, right);
+                    right
+                } else {
+                    let left = self.compile_expr(*lhs);
+                    let right = self.compile_expr(*rhs);
+                    return match op {
+                        Token::Plus => self.builder.build_float_add(left, right, "tmp"),
+                        Token::Minus => self.builder.build_float_sub(left, right, "tmp"),
+                        Token::AsterRisk => self.builder.build_float_mul(left, right, "tmp"),
+                        Token::Slash => self.builder.build_float_div(left, right, "tmp"),
+                        _ => {
+                            eprintln!("Error: Unknown operator.");
+                            process::exit(1);
+                        }
+                    }
                 }
+            },
+            AST::Variable(name) => {
+                let var = self.variables.get(&name).unwrap();
+                self.builder.build_load(*var, &name).into_float_value()
+            },
+            _ => {
+                eprintln!("Error: Not an expression.");
+                process::exit(1);
             }
         }
     }
 
-    pub fn compile(&mut self, ast: AST) -> FloatValue {
-        self.compile_expr(ast)
+    pub fn compile_stmt(&mut self, stmt: AST) {
+        match stmt {
+            AST::StmtList { list } => {
+                for s in list {
+                    self.compile_stmt(s);
+                }
+            },
+            AST::VariableDecl { name } => {
+                let name_cloned = name.clone();
+                let alloca = self.create_alloca(name_cloned);
+                self.variables.insert(name, alloca);
+            },
+            AST::Return { expr } => {
+                let result = self.compile_expr(*expr);
+                self.builder.build_return(Some(&result));
+            }
+            _ => { self.compile_expr(stmt); },
+        }
+    }
+
+    pub fn compile(&mut self, ast: AST) {
+        self.compile_stmt(ast);
     }
 }
 
@@ -427,7 +625,7 @@ fn jit_compile(compiler: &Compiler, funcname: &str) -> Option<JitFunction<Sum>> 
 
 #[test]
 fn debug_lexer() {
-    let src = String::from("10 + 20 + 30 * 40 / 5").into_bytes();
+    let src = String::from("return 10 + 20 + 30 * 40 / 5;").into_bytes();
     let lex: Lexer = Lexer::new(src);
     let tokens: Vec<(Token, u32)> = lex.collect();
     for (i, (tok, line)) in tokens.iter().enumerate() {
@@ -437,7 +635,7 @@ fn debug_lexer() {
 
 #[test]
 fn debug_parser() {
-    let src = String::from("10 + 20 + 30 * 40 / 5").into_bytes();
+    let src = String::from("var i = 0; return 10 + 20 + 30 * 40 / 5;").into_bytes();
     let mut parser = Parser::new(src);
     let ast = parser.parse();
     println!("{}", ast);
@@ -473,9 +671,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut compiler = Compiler::new(&context, &module, &builder, &execution_engine);
 
-    let sum = compiler.compile(ast);
-    compiler.builder.build_return(Some(&sum));
-    let func = jit_compile(&compiler, "Sum").ok_or("Error Occurred.")?;
+    compiler.compile(ast);
+    let func = jit_compile(&compiler, "main").ok_or("Error Occurred.")?;
     unsafe {
         println!("{}", func.call());
     }

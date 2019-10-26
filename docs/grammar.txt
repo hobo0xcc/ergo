@@ -1,6 +1,12 @@
 Ergo language's Grammar which written in BNF(Backus-Naur Form).
 
 Number ::= [0-9]+ ;
-Term_Expr ::= Number | '(' Addition_Expr ')' ;
+Identifier ::= [a-zA-Z]+ ;
+Term_Expr ::= Number | Identifier | '(' Addition_Expr ')' ;
 Multi_Expr ::= Term_Expr (('*' | '/') Term_Expr)* ;
 Addition_Expr ::= Multi_Expr (('+' | '-') Multi_Expr)* ;
+Assign_Expr ::= Addition_Expr ('=' Addition_Expr)* ;
+Return_Stmt ::= 'return' Assign_Expr ;
+Var_Stmt ::= 'var' Identifier | 'var' Identifier '=' Assign_Expr ;
+Stmt ::= Var_Stmt | Return_Stmt | Assign_Expr
+Stmt_List ::= Stmt StmtList | ''
